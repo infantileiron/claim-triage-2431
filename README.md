@@ -1,6 +1,6 @@
 # 禾序 · 报销异常分类复核
 
-财务共享组把历史人工复核标签训练成可解释的逻辑回归版本，再按异常概率排定待核票据；最终判断和签核由人员完成。原生 HTML/CSS/JS 四个业务页面：样本池、训练配置、分类评估、风险复核。
+财务共享组把历史人工复核标签训练成可解释的逻辑回归版本，再按异常概率排定待核票据；最终判断和签核由人员完成。原生 HTML/CSS/JS 五个业务页面：样本池、训练配置、分类评估、风险复核、版本比较。
 
 ## 真实模拟场景
 
@@ -22,6 +22,16 @@
 6. 09:40 生成当前版本高风险待标注样本的复核任务，重复生成不会重复添加。
 7. 10:00 analyst 复核原票据并填“核验正常”或“需进一步核实”及理由。
 8. 10:10 admin 签核人工结论；10:20 viewer 下载 `claim-triage-<版本ID>.json` 留档。
+9. 10:40 补标签后训练候选版本，在“版本比较”受理基线→候选比较：配对样本受理即冻结，worker 聚合逐票漏报金额差与 95% 置信区间。
+10. 11:00 仅当置信区间下界严格大于 0（漏报金额显著下降）比较才为“可切换”；admin 执行原子切换，未处理复核按候选评分重算，已填写/已签核结论保留原依据；viewer 下载 `version-comparison-<比较ID>.json`。
+
+## 版本比较与切换口径
+
+两个训练版本只在**双方均未训练过的同批已标注票据**上配对评估：配对池取两版留出集的交集，进入双方留出评估却出现在任一版训练集中的票据判为训练泄漏并整体拒绝；仅被某版用于训练、不在留出交集内的票据静默剔除。受理时（POST `/comparisons`）即把逐票配对明细冻结到比较记录，worker 只消费冻结样本，不重新取数。
+
+配对样本总数少于 20 笔、或任一类别少于 5 笔时拒绝比较（状态 `rejected`，附明确原因）。逐票明细记录两版分数、各自阈值下的预测、漏报/误报标记与漏报金额；聚合输出两版漏报金额、漏报金额差（基线−候选）及固定 seed（3106）配对 bootstrap 2000 次得到的 95% 置信区间。**只有置信区间下界严格大于 0**，候选漏报金额显著更低，比较状态才为 `passed`（可切换），否则 `rejected`，禁止切换。
+
+切换（POST `/comparisons/{id}/switch`，仅 admin）在单事务内原子完成：旧版本未处理（draft/pending）复核标记 `superseded` 并记录来源比较；按候选版本待标注评分重建过阈复核，已有人工结论（含已签核）的票据不重复建待核票、保留原依据；激活指针 `trainings.is_active` 翻转，全局至多一个生效版本。复核与签核接口对任务行加锁，与切换互斥，保护切换窗口内的新结论；切换后被取代任务不可再改或签核。事务失败整体回滚，沿原比较重试幂等、不新增待核票；以非生效版本为基线的过期比较会被拒绝。比较状态机：`queued → running → passed / rejected / failed`，worker 启动时把残留 queued/running 比较重新入队。
 
 ## 算法与口径
 
@@ -55,7 +65,7 @@ docker compose up -d --build
 | 异步 | Redis列表队列、独立Python worker与心跳 |
 | 数据 | MySQL8.0、Redis7；Nginx反代 `/api/` 去前缀 |
 
-`frontend/src` 下 api/stores/types/components/common/hooks/pages/router/utils/constants 分离网络、状态、契约、组件、表单、页面和枚举。`backend/src` 下 routes/controllers/services/models/schemas/middlewares/utils/constants/config 分离HTTP、查询、算法、持久化、校验、授权和配置。`backend/scripts/seed_demo.py` 用自然键只插入缺失账号/报销，不覆盖人工修订。`backend/migrations/001_initial.sql` 记录初始架构，实际初始DDL由SQLAlchemy metadata建立。
+`frontend/src` 下 api/stores/types/components/common/hooks/pages/router/utils/constants 分离网络、状态、契约、组件、表单、页面和枚举。`backend/src` 下 routes/controllers/services/models/schemas/middlewares/utils/constants/config 分离HTTP、查询、算法、持久化、校验、授权和配置；版本比较算法在 `services/comparison.py`，原子切换在 `services/switch.py`，worker 同时消费训练队列与比较队列。`backend/scripts/seed_demo.py` 用自然键只插入缺失账号/报销，不覆盖人工修订。`backend/migrations/001_initial.sql` 记录初始架构，实际初始DDL由SQLAlchemy metadata建立。后端测试位于 `backend/tests/`（pytest + SQLite + TestClient，不依赖 MySQL/Redis 容器，Redis 以桩替换），覆盖配对评估、训练泄漏、原子切换、签核竞争与失败恢复。
 
 共享枚举 ROLES/STATES/DECISIONS/LABELS 位于后端 `backend/src/constants/enums.py` 和前端 `frontend/src/constants/enums.js`；Pydantic枚举校验位于 `backend/src/schemas/business.py`，权限检查位于 `backend/src/middlewares/auth.py`。状态徽章/表格/表单字段为共享组件，两种中间件提供request ID和安全响应头；全局异常处理与审计记录横切业务。
 
@@ -65,6 +75,6 @@ docker compose up -d --build
 
 ## 已知范围
 
-逐条表单/API录入和完整字段修订；无CSV/Excel导入、删除、分页或外部审批通知。原始seed为确定性模拟数据，不能推断真实风险。风险复核任务不自动回写训练标签；须人工在样本页确认标签后重新训练。Google Fonts联网加载，离线字体回退。测试、截图和报告在源码外 `test-artifacts/gb-3106/`。
+逐条表单/API录入和完整字段修订；无CSV/Excel导入、删除、分页或外部审批通知。原始seed为确定性模拟数据，不能推断真实风险。风险复核任务不自动回写训练标签；须人工在样本页确认标签后重新训练。版本比较的 bootstrap 置信区间为演示口径（2000 次重抽样），不替代正式生产验收集。Google Fonts联网加载，离线字体回退。测试、截图和报告在源码外 `test-artifacts/gb-3106/`。
 
 License：MIT，见 LICENSE。

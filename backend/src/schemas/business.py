@@ -14,3 +14,6 @@ class TrainingInput(BaseModel):
 class ReviewInput(BaseModel):
  decision:Literal['valid','flagged']
  note:str=Field(min_length=6,max_length=2000)
+class ComparisonInput(BaseModel):
+ baseline_id:int=Field(gt=0)
+ candidate_id:int=Field(gt=0)

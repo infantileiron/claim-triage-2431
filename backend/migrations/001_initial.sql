@@ -1,5 +1,11 @@
 -- Initial schema is created from SQLAlchemy metadata at backend startup.
 -- claims: code unique, label nullable (0 normal, 1 anomaly).
--- trainings: frozen snapshot and holdout output JSON.
--- reviews: training_id / claim_id foreign keys with unique source pair.
+-- trainings: frozen snapshot and holdout output JSON; is_active marks the
+--   single effective scoring version (at most one row true at any time).
+-- reviews: training_id / claim_id foreign keys with unique source pair;
+--   superseded_by references the comparison that replaced an unhandled row
+--   during an atomic version switch; rows with human conclusions are kept.
+-- comparisons: paired evaluation of two done trainings on labelled claims
+--   that neither version trained on; pairing is frozen at acceptance time,
+--   state machine queued -> running -> passed / rejected / failed.
 -- Exact portable schema: src/models/entities.py.

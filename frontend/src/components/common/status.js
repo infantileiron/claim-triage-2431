@@ -1,1 +1,1 @@
-import {esc} from '../../utils/html.js';export const badge=s=>`<span class=tag>${esc(s)}</span>`;
+export {badge} from '../../pages/shared.js';
